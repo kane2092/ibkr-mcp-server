@@ -1,0 +1,19 @@
+# IBKR MCP Server Requirements
+# Python 3.9+ required
+
+# MCP Framework
+mcp>=1.0.0
+
+# Interactive Brokers API
+ibapi>=10.19.04
+
+# Core dependencies
+pydantic>=2.0.0
+httpx>=0.25.0
+
+# Async support
+asyncio
+aiofiles>=23.0.0
+
+# Utilities
+python-dotenv>=1.0.0

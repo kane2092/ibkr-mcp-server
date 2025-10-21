@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "ibkr": {
+      "command": "python",
+      "args": [
+        "C:/Users/YOUR_USERNAME/Documents/ibkr-mcp-server/src/ibkr_mcp_server.py"
+      ],
+      "env": {
+        "PYTHONPATH": "C:/Users/YOUR_USERNAME/Documents/ibkr-mcp-server"
+      }
+    }
+  }
+}
