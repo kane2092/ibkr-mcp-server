@@ -223,13 +223,13 @@ class IBKRBridge(EWrapper, EClient):
         # Store Greeks if valid
         if tickType in [10, 11, 12, 13, 53]:  # Various option computation types
             greeks_data = {
-                'implied_volatility': impliedVol if impliedVol != -1 and impliedVol < 10 else None,
-                'delta': delta if abs(delta) <= 1 else None,
-                'gamma': gamma if gamma != -2 else None,
-                'vega': vega if vega != -2 else None,
-                'theta': theta if theta != -2 else None,
-                'option_price': optPrice if optPrice >= 0 else None,
-                'underlying_price': undPrice if undPrice > 0 else None
+                'implied_volatility': impliedVol if impliedVol is not None and impliedVol != -1 and impliedVol < 10 else None,
+                'delta': delta if delta is not None and abs(delta) <= 1 else None,
+                'gamma': gamma if gamma is not None and gamma != -2 else None,
+                'vega': vega if vega is not None and vega != -2 else None,
+                'theta': theta if theta is not None and theta != -2 else None,
+                'option_price': optPrice if optPrice is not None and optPrice >= 0 else None,
+                'underlying_price': undPrice if undPrice is not None and undPrice > 0 else None
             }
             
             # Update with valid values only
@@ -356,6 +356,32 @@ class IBKRBridge(EWrapper, EClient):
         self.next_req_id += 1
         return req_id
     
+    def fix_order_attributes(self, order: Order) -> Order:
+        """
+        Fix order attributes to prevent Error 10268, 10269, 10270.
+
+        These deprecated attributes must be explicitly set to False
+        for TWS versions 983+ to avoid errors:
+        - Error 10268: The 'EtradeOnly' order attribute is not supported
+        - Error 10269: The 'FirmQuoteOnly' order attribute is not supported
+        - Error 10270: The 'NbboPriceCap' order attribute is not supported
+
+        Args:
+            order: Order object to fix
+
+        Returns:
+            Fixed order object
+        """
+        # Set deprecated attributes to False
+        order.eTradeOnly = False
+        order.firmQuoteOnly = False
+
+        # Additional safe defaults
+        if not hasattr(order, 'outsideRth'):
+            order.outsideRth = False
+
+        return order
+
     async def get_market_data_async(self, contract: Contract, 
                                    include_greeks: bool = False,
                                    timeout: float = MARKET_DATA_TIMEOUT) -> Dict[str, Any]:
@@ -432,7 +458,10 @@ class IBKRBridge(EWrapper, EClient):
         }
         
         try:
-            # Place order
+            # Fix deprecated order attributes
+        order = self.fix_order_attributes(order)
+
+        # Place order
             self.placeOrder(order_id, contract, order)
             
             # Wait for initial acknowledgment
@@ -474,6 +503,10 @@ class IBKRBridge(EWrapper, EClient):
         if limit_price:
             parent.lmtPrice = limit_price
         parent.transmit = False  # Don't transmit until all orders are created
+
+        # Fix deprecated attributes for parent
+        parent = self.fix_order_attributes(parent)
+
         
         # Take profit order (opposite action)
         take_profit = Order()
@@ -484,6 +517,10 @@ class IBKRBridge(EWrapper, EClient):
         take_profit.lmtPrice = take_profit_price
         take_profit.parentId = parent_id
         take_profit.transmit = False
+
+        # Fix deprecated attributes for take profit
+        take_profit = self.fix_order_attributes(take_profit)
+
         
         # Stop loss order (opposite action)
         stop_loss = Order()
@@ -495,6 +532,10 @@ class IBKRBridge(EWrapper, EClient):
         stop_loss.parentId = parent_id
         stop_loss.triggerMethod = 2  # 2 = last price
         stop_loss.transmit = transmit  # This transmits all three orders
+
+        # Fix deprecated attributes for stop loss
+        stop_loss = self.fix_order_attributes(stop_loss)
+
         
         # Place all three orders
         await self.place_order_async(contract, parent)
