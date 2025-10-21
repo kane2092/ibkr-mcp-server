@@ -355,7 +355,7 @@ class IBKRBridge(EWrapper, EClient):
         req_id = self.next_req_id
         self.next_req_id += 1
         return req_id
-    
+
     def fix_order_attributes(self, order: Order) -> Order:
         """
         Fix order attributes to prevent Error 10268, 10269, 10270.
@@ -382,6 +382,7 @@ class IBKRBridge(EWrapper, EClient):
 
         return order
 
+    
     async def get_market_data_async(self, contract: Contract, 
                                    include_greeks: bool = False,
                                    timeout: float = MARKET_DATA_TIMEOUT) -> Dict[str, Any]:
@@ -459,9 +460,9 @@ class IBKRBridge(EWrapper, EClient):
         
         try:
             # Fix deprecated order attributes
-        order = self.fix_order_attributes(order)
+            order = self.fix_order_attributes(order)
 
-        # Place order
+            # Place order
             self.placeOrder(order_id, contract, order)
             
             # Wait for initial acknowledgment
@@ -506,7 +507,6 @@ class IBKRBridge(EWrapper, EClient):
 
         # Fix deprecated attributes for parent
         parent = self.fix_order_attributes(parent)
-
         
         # Take profit order (opposite action)
         take_profit = Order()
@@ -520,7 +520,6 @@ class IBKRBridge(EWrapper, EClient):
 
         # Fix deprecated attributes for take profit
         take_profit = self.fix_order_attributes(take_profit)
-
         
         # Stop loss order (opposite action)
         stop_loss = Order()
@@ -535,7 +534,6 @@ class IBKRBridge(EWrapper, EClient):
 
         # Fix deprecated attributes for stop loss
         stop_loss = self.fix_order_attributes(stop_loss)
-
         
         # Place all three orders
         await self.place_order_async(contract, parent)
