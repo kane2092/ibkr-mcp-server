@@ -115,6 +115,8 @@ class IBKRBridge(EWrapper, EClient):
         self.execution_details: Dict[int, List[Dict[str, Any]]] = {}
         self.commission_reports: Dict[str, Dict[str, Any]] = {}
         self.open_orders: List[Dict[str, Any]] = []
+        self.option_params: Dict[int, List[Dict[str, Any]]] = {}
+        self.contract_details_data: Dict[int, List[Dict[str, Any]]] = {}
         
         # Event management
         self.events: Dict[str, asyncio.Event] = {}
@@ -474,6 +476,91 @@ class IBKRBridge(EWrapper, EClient):
         event_key = f"exec_details_{reqId}"
         if event_key in self.events and self.loop:
             self.loop.call_soon_threadsafe(self.events[event_key].set)
+
+    def securityDefinitionOptionParameter(self, reqId: int, exchange: str,
+                                         underlyingConId: int, tradingClass: str,
+                                         multiplier: str, expirations: set,
+                                         strikes: set):
+        """Receive option parameter definition."""
+        if reqId not in self.option_params:
+            self.option_params[reqId] = []
+
+        param_data = {
+            'exchange': exchange,
+            'underlying_con_id': underlyingConId,
+            'trading_class': tradingClass,
+            'multiplier': multiplier,
+            'expirations': sorted(list(expirations)),
+            'strikes': sorted(list(strikes))
+        }
+        self.option_params[reqId].append(param_data)
+        logger.info(f"Option params: {exchange} - {len(expirations)} expirations, {len(strikes)} strikes")
+
+    def securityDefinitionOptionParameterEnd(self, reqId: int):
+        """Signal end of option parameters."""
+        logger.info(f"Option parameters complete for request {reqId}")
+        event_key = f"option_params_{reqId}"
+        if event_key in self.events and self.loop:
+            self.loop.call_soon_threadsafe(self.events[event_key].set)
+
+    def contractDetails(self, reqId: int, contractDetails):
+        """Receive contract details (enhanced for both option chains and general contract details)."""
+        contract = contractDetails.contract
+
+        # Store detailed contract information
+        detail_data = {
+            'con_id': contract.conId,
+            'symbol': contract.symbol,
+            'sec_type': contract.secType,
+            'exchange': contract.exchange,
+            'primary_exchange': contract.primaryExchange,
+            'currency': contract.currency,
+            'local_symbol': contract.localSymbol,
+            'trading_class': contract.tradingClass,
+            'multiplier': contract.multiplier if contract.multiplier else "1",
+            'min_tick': contractDetails.minTick,
+            'order_types': contractDetails.orderTypes,
+            'valid_exchanges': contractDetails.validExchanges,
+            'contract_month': contract.lastTradeDateOrContractMonth,
+            'trading_hours': contractDetails.tradingHours,
+            'liquid_hours': contractDetails.liquidHours,
+            'time_zone_id': contractDetails.timeZoneId,
+            'long_name': contractDetails.longName,
+            'industry': getattr(contractDetails, 'industry', ''),
+            'category': getattr(contractDetails, 'category', ''),
+            'subcategory': getattr(contractDetails, 'subcategory', '')
+        }
+
+        # For options, add option-specific fields
+        if contract.secType == "OPT":
+            detail_data.update({
+                'strike': contract.strike,
+                'right': contract.right,
+                'expiry': contract.lastTradeDateOrContractMonth
+            })
+
+            # Also store in option_chains for backward compatibility
+            option_data = {
+                'symbol': contract.symbol,
+                'strike': contract.strike,
+                'right': contract.right,
+                'expiry': contract.lastTradeDateOrContractMonth,
+                'multiplier': contract.multiplier,
+                'exchange': contract.exchange,
+                'con_id': contract.conId
+            }
+
+            key = f"chain_{reqId}"
+            if key not in self.option_chains:
+                self.option_chains[key] = []
+            self.option_chains[key].append(option_data)
+
+        # Store in contract_details_data
+        if reqId not in self.contract_details_data:
+            self.contract_details_data[reqId] = []
+        self.contract_details_data[reqId].append(detail_data)
+
+    # contractDetailsEnd already exists, no need to duplicate
 
     # ==========================================
     # High-level async methods
@@ -1033,6 +1120,142 @@ class IBKRBridge(EWrapper, EClient):
         self.reqGlobalCancel()
         logger.info("Global cancel requested - all orders will be cancelled")
 
+    async def get_option_parameters_async(self, symbol: str, sec_type: str = "STK",
+                                         exchange: str = "SMART",
+                                         timeout: float = 10.0) -> List[Dict[str, Any]]:
+        """
+        Get option parameters (available strikes and expirations) for an underlying.
+
+        Args:
+            symbol: Underlying symbol (e.g., "SPY", "AAPL")
+            sec_type: Security type (default: "STK")
+            exchange: Exchange (default: "SMART")
+            timeout: Timeout in seconds
+
+        Returns:
+            List of option parameter sets with expirations and strikes
+        """
+        # First, get the contract ID for the underlying
+        logger.info(f"Getting contract ID for {symbol}...")
+        details = await self.get_contract_details_async(
+            symbol=symbol,
+            sec_type=sec_type,
+            exchange=exchange,
+            timeout=5.0
+        )
+
+        if not details:
+            logger.error(f"Could not find contract details for {symbol}")
+            return []
+
+        underlying_con_id = details[0]['con_id']
+        logger.info(f"Found contract ID {underlying_con_id} for {symbol}")
+
+        req_id = self.get_next_req_id()
+        event_key = f"option_params_{req_id}"
+        self.events[event_key] = asyncio.Event()
+
+        # Clear previous data
+        self.option_params[req_id] = []
+
+        try:
+            # Request option parameters with the valid contract ID
+            self.reqSecDefOptParams(
+                reqId=req_id,
+                underlyingSymbol=symbol,
+                futFopExchange="",
+                underlyingSecType=sec_type,
+                underlyingConId=underlying_con_id
+            )
+
+            # Wait for parameters
+            await asyncio.wait_for(
+                self.events[event_key].wait(),
+                timeout=timeout
+            )
+
+            # Return collected parameters
+            params = self.option_params.get(req_id, [])
+            logger.info(f"Received option parameters for {symbol}: {len(params)} exchange(s)")
+            return params
+
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout getting option parameters for {symbol}")
+            return []
+        finally:
+            self.events.pop(event_key, None)
+            self.option_params.pop(req_id, None)
+
+    async def get_contract_details_async(self, symbol: str, sec_type: str = "STK",
+                                        exchange: str = "SMART", currency: str = "USD",
+                                        strike: float = 0.0, right: str = "",
+                                        expiry: str = "",
+                                        timeout: float = 10.0) -> List[Dict[str, Any]]:
+        """
+        Get detailed contract information.
+
+        Args:
+            symbol: Symbol to get details for
+            sec_type: Security type (STK, OPT, FUT, etc.)
+            exchange: Exchange
+            currency: Currency
+            strike: Strike price (for options)
+            right: Option right (C/P for options)
+            expiry: Expiration date (for options/futures, format: YYYYMMDD)
+            timeout: Timeout in seconds
+
+        Returns:
+            List of contract details matching criteria
+        """
+        req_id = self.get_next_req_id()
+        event_key = f"contract_details_{req_id}"
+        self.events[event_key] = asyncio.Event()
+
+        # Clear previous data
+        self.contract_details_data[req_id] = []
+
+        try:
+            # Create contract for search
+            contract = Contract()
+            contract.symbol = symbol
+            contract.secType = sec_type
+            contract.exchange = exchange
+            contract.currency = currency
+
+            # For options
+            if sec_type == "OPT":
+                if strike > 0:
+                    contract.strike = strike
+                if right:
+                    contract.right = right
+                if expiry:
+                    contract.lastTradeDateOrContractMonth = expiry
+
+            # For futures
+            if sec_type == "FUT" and expiry:
+                contract.lastTradeDateOrContractMonth = expiry
+
+            # Request contract details
+            self.reqContractDetails(req_id, contract)
+
+            # Wait for details
+            await asyncio.wait_for(
+                self.events[event_key].wait(),
+                timeout=timeout
+            )
+
+            # Return collected details
+            details = self.contract_details_data.get(req_id, [])
+            logger.info(f"Received {len(details)} contract detail(s) for {symbol}")
+            return details
+
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout getting contract details for {symbol}")
+            return []
+        finally:
+            self.events.pop(event_key, None)
+            self.contract_details_data.pop(req_id, None)
+
 # ==========================================
 # Global Bridge Instance
 # ==========================================
@@ -1454,6 +1677,74 @@ async def handle_list_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {}
+            }
+        ),
+        types.Tool(
+            name="ibkr_get_option_params",
+            description="Get available option strikes and expirations for an underlying (option chain discovery)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "symbol": {
+                        "type": "string",
+                        "description": "Underlying symbol (e.g., SPY, AAPL, SPX)"
+                    },
+                    "sec_type": {
+                        "type": "string",
+                        "enum": ["STK", "IND"],
+                        "default": "STK",
+                        "description": "Underlying security type"
+                    },
+                    "exchange": {
+                        "type": "string",
+                        "default": "SMART",
+                        "description": "Exchange"
+                    }
+                },
+                "required": ["symbol"]
+            }
+        ),
+        types.Tool(
+            name="ibkr_get_contract_details",
+            description="Get detailed contract information (conId, multiplier, trading hours, etc.)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "symbol": {
+                        "type": "string",
+                        "description": "Symbol to get details for"
+                    },
+                    "sec_type": {
+                        "type": "string",
+                        "enum": ["STK", "OPT", "FUT", "IND", "CASH"],
+                        "default": "STK",
+                        "description": "Security type"
+                    },
+                    "exchange": {
+                        "type": "string",
+                        "default": "SMART",
+                        "description": "Exchange"
+                    },
+                    "currency": {
+                        "type": "string",
+                        "default": "USD",
+                        "description": "Currency"
+                    },
+                    "strike": {
+                        "type": "number",
+                        "description": "Strike price (for options only)"
+                    },
+                    "right": {
+                        "type": "string",
+                        "enum": ["C", "P"],
+                        "description": "Option right: C=Call, P=Put (for options only)"
+                    },
+                    "expiry": {
+                        "type": "string",
+                        "description": "Expiration date YYYYMMDD (for options/futures)"
+                    }
+                },
+                "required": ["symbol"]
             }
         )
     ]
@@ -2080,6 +2371,90 @@ async def handle_call_tool(
                 "status": "success",
                 "message": "Global cancel requested. All open orders are being cancelled.",
                 "warning": "This cancels ALL orders from ALL clients and TWS!"
+            }
+
+            return [types.TextContent(
+                type="text",
+                text=json.dumps(result, indent=2)
+            )]
+
+        elif name == "ibkr_get_option_params":
+            if not bridge.connected:
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({"error": "Not connected to TWS"}, indent=2)
+                )]
+
+            symbol = arguments.get("symbol")
+            sec_type = arguments.get("sec_type", "STK")
+            exchange = arguments.get("exchange", "SMART")
+
+            # Get option parameters
+            params = await bridge.get_option_parameters_async(
+                symbol=symbol,
+                sec_type=sec_type,
+                exchange=exchange
+            )
+
+            result = {
+                "status": "success",
+                "symbol": symbol,
+                "underlying_type": sec_type,
+                "param_sets": len(params),
+                "parameters": params
+            }
+
+            # Add summary statistics if params available
+            if params:
+                all_expirations = set()
+                all_strikes = set()
+                for param_set in params:
+                    all_expirations.update(param_set.get('expirations', []))
+                    all_strikes.update(param_set.get('strikes', []))
+
+                result['summary'] = {
+                    'total_expirations': len(all_expirations),
+                    'total_strikes': len(all_strikes),
+                    'exchanges': [p['exchange'] for p in params]
+                }
+
+            return [types.TextContent(
+                type="text",
+                text=json.dumps(result, indent=2)
+            )]
+
+        elif name == "ibkr_get_contract_details":
+            if not bridge.connected:
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({"error": "Not connected to TWS"}, indent=2)
+                )]
+
+            symbol = arguments.get("symbol")
+            sec_type = arguments.get("sec_type", "STK")
+            exchange = arguments.get("exchange", "SMART")
+            currency = arguments.get("currency", "USD")
+            strike = arguments.get("strike", 0.0)
+            right = arguments.get("right", "")
+            expiry = arguments.get("expiry", "")
+
+            # Get contract details
+            details = await bridge.get_contract_details_async(
+                symbol=symbol,
+                sec_type=sec_type,
+                exchange=exchange,
+                currency=currency,
+                strike=strike,
+                right=right,
+                expiry=expiry
+            )
+
+            result = {
+                "status": "success",
+                "symbol": symbol,
+                "sec_type": sec_type,
+                "contract_count": len(details),
+                "contracts": details
             }
 
             return [types.TextContent(
