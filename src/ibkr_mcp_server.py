@@ -107,6 +107,14 @@ class IBKRBridge(EWrapper, EClient):
         self.option_chains: Dict[str, List[Dict[str, Any]]] = {}
         self.historical_data: Dict[int, List[Dict[str, Any]]] = {}
         self.pending_orders: Dict[int, Dict[str, Any]] = {}
+
+        # New data storage for enhanced features
+        self.realtime_bars: Dict[int, List[Dict[str, Any]]] = {}
+        self.pnl_data: Dict[int, Dict[str, Any]] = {}
+        self.pnl_single_data: Dict[int, Dict[str, Any]] = {}
+        self.execution_details: Dict[int, List[Dict[str, Any]]] = {}
+        self.commission_reports: Dict[str, Dict[str, Any]] = {}
+        self.open_orders: List[Dict[str, Any]] = []
         
         # Event management
         self.events: Dict[str, asyncio.Event] = {}
@@ -339,7 +347,134 @@ class IBKRBridge(EWrapper, EClient):
         event_key = f"contract_details_{reqId}"
         if event_key in self.events and self.loop:
             self.loop.call_soon_threadsafe(self.events[event_key].set)
-    
+
+    def historicalData(self, reqId: int, bar: BarData):
+        """Receive historical bar data."""
+        if reqId not in self.historical_data:
+            self.historical_data[reqId] = []
+
+        bar_data = {
+            'date': bar.date,
+            'open': bar.open,
+            'high': bar.high,
+            'low': bar.low,
+            'close': bar.close,
+            'volume': bar.volume,
+            'wap': getattr(bar, 'wap', 0),  # Weighted average price (may not always be available)
+            'bar_count': getattr(bar, 'barCount', 0)
+        }
+        self.historical_data[reqId].append(bar_data)
+
+    def historicalDataEnd(self, reqId: int, start: str, end: str):
+        """Signal end of historical data."""
+        logger.info(f"Historical data complete for request {reqId}: {start} to {end}")
+        event_key = f"historical_data_{reqId}"
+        if event_key in self.events and self.loop:
+            self.loop.call_soon_threadsafe(self.events[event_key].set)
+
+    def realtimeBar(self, reqId: int, time: int, open_: float, high: float,
+                    low: float, close: float, volume: int, wap: float, count: int):
+        """Receive real-time 5-second bar."""
+        if reqId not in self.realtime_bars:
+            self.realtime_bars[reqId] = []
+
+        bar_data = {
+            'time': datetime.fromtimestamp(time).isoformat(),
+            'open': open_,
+            'high': high,
+            'low': low,
+            'close': close,
+            'volume': volume,
+            'wap': wap,
+            'count': count
+        }
+        self.realtime_bars[reqId].append(bar_data)
+
+        # Keep only last 100 bars to avoid memory issues
+        if len(self.realtime_bars[reqId]) > 100:
+            self.realtime_bars[reqId] = self.realtime_bars[reqId][-100:]
+
+        # Signal new bar received
+        event_key = f"realtime_bar_{reqId}"
+        if event_key in self.events and self.loop:
+            self.loop.call_soon_threadsafe(self.events[event_key].set)
+
+    def pnl(self, reqId: int, dailyPnL: float, unrealizedPnL: float, realizedPnL: float):
+        """Receive real-time P&L for account."""
+        self.pnl_data[reqId] = {
+            'daily_pnl': dailyPnL,
+            'unrealized_pnl': unrealizedPnL,
+            'realized_pnl': realizedPnL,
+            'timestamp': datetime.now().isoformat()
+        }
+
+        # Signal P&L update
+        event_key = f"pnl_{reqId}"
+        if event_key in self.events and self.loop:
+            self.loop.call_soon_threadsafe(self.events[event_key].set)
+
+    def pnlSingle(self, reqId: int, pos: int, dailyPnL: float,
+                  unrealizedPnL: float, realizedPnL: float, value: float):
+        """Receive real-time P&L for single position."""
+        self.pnl_single_data[reqId] = {
+            'position': pos,
+            'daily_pnl': dailyPnL,
+            'unrealized_pnl': unrealizedPnL,
+            'realized_pnl': realizedPnL,
+            'value': value,
+            'timestamp': datetime.now().isoformat()
+        }
+
+        # Signal P&L update
+        event_key = f"pnl_single_{reqId}"
+        if event_key in self.events and self.loop:
+            self.loop.call_soon_threadsafe(self.events[event_key].set)
+
+    def execDetails(self, reqId: int, contract: Contract, execution):
+        """Receive execution details."""
+        if reqId not in self.execution_details:
+            self.execution_details[reqId] = []
+
+        exec_data = {
+            'exec_id': execution.execId,
+            'order_id': execution.orderId,
+            'symbol': contract.symbol,
+            'sec_type': contract.secType,
+            'time': execution.time,
+            'account': execution.acctNumber,
+            'exchange': execution.exchange,
+            'side': execution.side,
+            'shares': execution.shares,
+            'price': execution.price,
+            'perm_id': execution.permId,
+            'client_id': execution.clientId,
+            'liquidation': execution.liquidation,
+            'cum_qty': execution.cumQty,
+            'avg_price': execution.avgPrice
+        }
+        self.execution_details[reqId].append(exec_data)
+        logger.info(f"Execution: {execution.side} {execution.shares} {contract.symbol} @ {execution.price}")
+
+    def commissionReport(self, commissionReport):
+        """Receive commission report for execution."""
+        report_data = {
+            'exec_id': commissionReport.execId,
+            'commission': commissionReport.commission,
+            'currency': commissionReport.currency,
+            'realized_pnl': commissionReport.realizedPNL,
+            'yield_': commissionReport.yield_,
+            'yield_redemption_date': commissionReport.yieldRedemptionDate
+        }
+        self.commission_reports[commissionReport.execId] = report_data
+        logger.info(f"Commission: {commissionReport.commission} {commissionReport.currency} for {commissionReport.execId}")
+
+    def execDetailsEnd(self, reqId: int):
+        """Signal end of execution details."""
+        logger.info(f"Execution details complete for request {reqId}")
+        event_key = f"exec_details_{reqId}"
+        if event_key in self.events and self.loop:
+            self.loop.call_soon_threadsafe(self.events[event_key].set)
+
     # ==========================================
     # High-level async methods
     # ==========================================
@@ -608,6 +743,296 @@ class IBKRBridge(EWrapper, EClient):
             self.events.pop(event_key, None)
             self.option_chains.pop(chain_key, None)
 
+    async def get_historical_data_async(self, contract: Contract,
+                                       end_datetime: str = "",
+                                       duration_str: str = "1 D",
+                                       bar_size: str = "1 hour",
+                                       what_to_show: str = "TRADES",
+                                       use_rth: int = 1,
+                                       timeout: float = 30.0) -> List[Dict[str, Any]]:
+        """
+        Get historical bar data asynchronously.
+
+        Args:
+            contract: Contract to fetch data for
+            end_datetime: End date/time (empty string = current moment)
+            duration_str: Time period (e.g., "1 D", "1 W", "1 M")
+            bar_size: Bar size (e.g., "1 min", "5 mins", "1 hour", "1 day")
+            what_to_show: Data type (TRADES, MIDPOINT, BID, ASK, etc.)
+            use_rth: 1=Regular Trading Hours only, 0=All hours
+            timeout: Timeout in seconds
+
+        Returns:
+            List of bar data dictionaries
+        """
+        req_id = self.get_next_req_id()
+        event_key = f"historical_data_{req_id}"
+        self.events[event_key] = asyncio.Event()
+
+        # Clear previous data
+        self.historical_data[req_id] = []
+
+        try:
+            # Request historical data
+            self.reqHistoricalData(
+                reqId=req_id,
+                contract=contract,
+                endDateTime=end_datetime,
+                durationStr=duration_str,
+                barSizeSetting=bar_size,
+                whatToShow=what_to_show,
+                useRTH=use_rth,
+                formatDate=1,
+                keepUpToDate=False,
+                chartOptions=[]
+            )
+
+            # Wait for data
+            await asyncio.wait_for(
+                self.events[event_key].wait(),
+                timeout=timeout
+            )
+
+            # Return collected bars
+            bars = self.historical_data.get(req_id, [])
+            logger.info(f"Received {len(bars)} historical bars for {contract.symbol}")
+            return bars
+
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout getting historical data for {contract.symbol}")
+            return []
+        finally:
+            self.events.pop(event_key, None)
+            self.historical_data.pop(req_id, None)
+
+    async def subscribe_realtime_bars_async(self, contract: Contract,
+                                           what_to_show: str = "TRADES",
+                                           use_rth: bool = False) -> int:
+        """
+        Subscribe to real-time 5-second bars.
+
+        Args:
+            contract: Contract to subscribe to
+            what_to_show: Data type (TRADES or MIDPOINT)
+            use_rth: Regular trading hours only
+
+        Returns:
+            Request ID for this subscription
+        """
+        req_id = self.get_next_req_id()
+        event_key = f"realtime_bar_{req_id}"
+        self.events[event_key] = asyncio.Event()
+
+        # Initialize storage
+        self.realtime_bars[req_id] = []
+
+        try:
+            # Request real-time bars (5 seconds only)
+            self.reqRealTimeBars(
+                reqId=req_id,
+                contract=contract,
+                barSize=5,  # Fixed at 5 seconds
+                whatToShow=what_to_show,
+                useRTH=use_rth,
+                realTimeBarsOptions=[]
+            )
+
+            # Wait for first bar
+            await asyncio.wait_for(
+                self.events[event_key].wait(),
+                timeout=10.0
+            )
+
+            logger.info(f"Real-time bars subscription started for {contract.symbol} (req_id: {req_id})")
+            return req_id
+
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout starting real-time bars for {contract.symbol}")
+            return req_id
+
+    def cancel_realtime_bars(self, req_id: int):
+        """Cancel real-time bars subscription."""
+        self.cancelRealTimeBars(req_id)
+        self.realtime_bars.pop(req_id, None)
+        self.events.pop(f"realtime_bar_{req_id}", None)
+        logger.info(f"Real-time bars subscription cancelled (req_id: {req_id})")
+
+    async def subscribe_pnl_async(self, account: str, model_code: str = "") -> int:
+        """
+        Subscribe to real-time P&L updates for account.
+
+        Args:
+            account: Account code
+            model_code: Portfolio model code (empty if not applicable)
+
+        Returns:
+            Request ID for this subscription
+        """
+        req_id = self.get_next_req_id()
+        event_key = f"pnl_{req_id}"
+        self.events[event_key] = asyncio.Event()
+
+        try:
+            # Subscribe to P&L
+            self.reqPnL(req_id, account, model_code)
+
+            # Wait for first update
+            await asyncio.wait_for(
+                self.events[event_key].wait(),
+                timeout=5.0
+            )
+
+            logger.info(f"P&L subscription started for account {account} (req_id: {req_id})")
+            return req_id
+
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout starting P&L subscription for {account}")
+            return req_id
+
+    def cancel_pnl(self, req_id: int):
+        """Cancel P&L subscription."""
+        self.cancelPnL(req_id)
+        self.pnl_data.pop(req_id, None)
+        self.events.pop(f"pnl_{req_id}", None)
+        logger.info(f"P&L subscription cancelled (req_id: {req_id})")
+
+    async def subscribe_pnl_single_async(self, account: str, con_id: int,
+                                        model_code: str = "") -> int:
+        """
+        Subscribe to real-time P&L for single position.
+
+        Args:
+            account: Account code
+            con_id: Contract ID for the position
+            model_code: Portfolio model code (empty if not applicable)
+
+        Returns:
+            Request ID for this subscription
+        """
+        req_id = self.get_next_req_id()
+        event_key = f"pnl_single_{req_id}"
+        self.events[event_key] = asyncio.Event()
+
+        try:
+            # Subscribe to position P&L
+            self.reqPnLSingle(req_id, account, model_code, con_id)
+
+            # Wait for first update
+            await asyncio.wait_for(
+                self.events[event_key].wait(),
+                timeout=5.0
+            )
+
+            logger.info(f"Position P&L subscription started for conId {con_id} (req_id: {req_id})")
+            return req_id
+
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout starting position P&L subscription")
+            return req_id
+
+    def cancel_pnl_single(self, req_id: int):
+        """Cancel position P&L subscription."""
+        self.cancelPnLSingle(req_id)
+        self.pnl_single_data.pop(req_id, None)
+        self.events.pop(f"pnl_single_{req_id}", None)
+        logger.info(f"Position P&L subscription cancelled (req_id: {req_id})")
+
+    async def get_executions_async(self, client_id: int = -1, acct_code: str = "",
+                                  time_filter: str = "", symbol: str = "",
+                                  sec_type: str = "", exchange: str = "",
+                                  side: str = "", timeout: float = 10.0) -> Dict[str, Any]:
+        """
+        Get execution details with optional filters.
+
+        Args:
+            client_id: Filter by client ID (-1 = all)
+            acct_code: Filter by account code
+            time_filter: Filter by time (format: yyyymmdd-hh:mm:ss)
+            symbol: Filter by symbol
+            sec_type: Filter by security type
+            exchange: Filter by exchange
+            side: Filter by side (BOT/SLD)
+            timeout: Timeout in seconds
+
+        Returns:
+            Dict with executions and commission reports
+        """
+        req_id = self.get_next_req_id()
+        event_key = f"exec_details_{req_id}"
+        self.events[event_key] = asyncio.Event()
+
+        # Clear previous data
+        self.execution_details[req_id] = []
+
+        # Import ExecutionFilter
+        from ibapi.execution import ExecutionFilter
+
+        try:
+            # Create filter
+            exec_filter = ExecutionFilter()
+            exec_filter.clientId = client_id
+            exec_filter.acctCode = acct_code
+            exec_filter.time = time_filter
+            exec_filter.symbol = symbol
+            exec_filter.secType = sec_type
+            exec_filter.exchange = exchange
+            exec_filter.side = side
+
+            # Request executions
+            self.reqExecutions(req_id, exec_filter)
+
+            # Wait for all executions
+            await asyncio.wait_for(
+                self.events[event_key].wait(),
+                timeout=timeout
+            )
+
+            # Get results with commissions
+            executions = self.execution_details.get(req_id, [])
+
+            # Add commission data to executions
+            for exec_data in executions:
+                exec_id = exec_data['exec_id']
+                if exec_id in self.commission_reports:
+                    exec_data['commission'] = self.commission_reports[exec_id]
+
+            logger.info(f"Received {len(executions)} execution details")
+            return {
+                'executions': executions,
+                'count': len(executions)
+            }
+
+        except asyncio.TimeoutError:
+            logger.warning("Timeout getting execution details")
+            return {'executions': [], 'count': 0}
+        finally:
+            self.events.pop(event_key, None)
+            self.execution_details.pop(req_id, None)
+
+    async def get_all_open_orders_async(self, timeout: float = 10.0) -> List[Dict[str, Any]]:
+        """
+        Get all open orders from all clients.
+
+        Returns:
+            List of all open orders
+        """
+        # Clear existing open orders
+        self.open_orders = []
+
+        # Request all open orders
+        self.reqAllOpenOrders()
+
+        # Wait a bit for orders to arrive
+        await asyncio.sleep(2.0)
+
+        logger.info(f"Retrieved {len(self.orders)} open orders")
+        return list(self.orders.values())
+
+    def cancel_all_orders_async(self):
+        """Cancel all open orders (global cancel)."""
+        self.reqGlobalCancel()
+        logger.info("Global cancel requested - all orders will be cancelled")
+
 # ==========================================
 # Global Bridge Instance
 # ==========================================
@@ -869,6 +1294,163 @@ async def handle_list_tools() -> list[types.Tool]:
         types.Tool(
             name="ibkr_get_account_summary",
             description="Get account summary with buying power and balances",
+            inputSchema={
+                "type": "object",
+                "properties": {}
+            }
+        ),
+        types.Tool(
+            name="ibkr_get_historical_data",
+            description="Get historical OHLCV candlestick data for charting and backtesting",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "symbol": {
+                        "type": "string",
+                        "description": "Symbol to get historical data for"
+                    },
+                    "sec_type": {
+                        "type": "string",
+                        "enum": ["STK", "IND", "OPT", "FUT"],
+                        "default": "STK",
+                        "description": "Security type"
+                    },
+                    "bar_size": {
+                        "type": "string",
+                        "enum": ["1 min", "5 mins", "15 mins", "30 mins", "1 hour", "2 hours", "4 hours", "1 day", "1 week"],
+                        "default": "1 hour",
+                        "description": "Bar size/granularity"
+                    },
+                    "duration": {
+                        "type": "string",
+                        "enum": ["1 D", "2 D", "1 W", "1 M", "3 M", "6 M", "1 Y"],
+                        "default": "1 D",
+                        "description": "Time period (D=Day, W=Week, M=Month, Y=Year)"
+                    },
+                    "what_to_show": {
+                        "type": "string",
+                        "enum": ["TRADES", "MIDPOINT", "BID", "ASK", "BID_ASK"],
+                        "default": "TRADES",
+                        "description": "Data type to fetch"
+                    },
+                    "use_rth": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Regular trading hours only (true) or all hours (false)"
+                    }
+                },
+                "required": ["symbol"]
+            }
+        ),
+        types.Tool(
+            name="ibkr_subscribe_realtime_bars",
+            description="Subscribe to real-time 5-second OHLCV bars (live charting)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "symbol": {
+                        "type": "string",
+                        "description": "Symbol to subscribe to"
+                    },
+                    "sec_type": {
+                        "type": "string",
+                        "enum": ["STK", "IND", "OPT", "FUT"],
+                        "default": "STK",
+                        "description": "Security type"
+                    },
+                    "what_to_show": {
+                        "type": "string",
+                        "enum": ["TRADES", "MIDPOINT"],
+                        "default": "TRADES",
+                        "description": "Data type (TRADES required for volume)"
+                    },
+                    "use_rth": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Regular trading hours only"
+                    }
+                },
+                "required": ["symbol"]
+            }
+        ),
+        types.Tool(
+            name="ibkr_cancel_realtime_bars",
+            description="Cancel real-time bars subscription",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "req_id": {
+                        "type": "integer",
+                        "description": "Request ID from subscribe_realtime_bars"
+                    }
+                },
+                "required": ["req_id"]
+            }
+        ),
+        types.Tool(
+            name="ibkr_subscribe_pnl",
+            description="Subscribe to real-time P&L updates for entire account",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {
+                        "type": "string",
+                        "description": "Account code (optional, will use default)"
+                    }
+                }
+            }
+        ),
+        types.Tool(
+            name="ibkr_subscribe_pnl_single",
+            description="Subscribe to real-time P&L for specific position",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "account": {
+                        "type": "string",
+                        "description": "Account code"
+                    },
+                    "con_id": {
+                        "type": "integer",
+                        "description": "Contract ID of the position"
+                    }
+                },
+                "required": ["con_id"]
+            }
+        ),
+        types.Tool(
+            name="ibkr_get_executions",
+            description="Get today's execution details with commissions and P&L",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "symbol": {
+                        "type": "string",
+                        "description": "Filter by symbol (optional)"
+                    },
+                    "side": {
+                        "type": "string",
+                        "enum": ["BOT", "SLD"],
+                        "description": "Filter by side: BOT=Buy, SLD=Sell (optional)"
+                    },
+                    "client_id": {
+                        "type": "integer",
+                        "description": "Filter by client ID (optional)"
+                    }
+                }
+            }
+        ),
+        types.Tool(
+            name="ibkr_get_all_open_orders",
+            description="Get all open orders from all clients (better overview than single order status)",
+            inputSchema={
+                "type": "object",
+                "properties": {}
+            }
+        ),
+        types.Tool(
+            name="ibkr_cancel_all_orders",
+            description="EMERGENCY: Cancel ALL open orders globally (from API and TWS)",
             inputSchema={
                 "type": "object",
                 "properties": {}
@@ -1244,7 +1826,267 @@ async def handle_call_tool(
                     type="text",
                     text=json.dumps({"error": "No account data available"}, indent=2)
                 )]
-        
+
+        elif name == "ibkr_get_historical_data":
+            if not bridge.connected:
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({"error": "Not connected to TWS"}, indent=2)
+                )]
+
+            symbol = arguments.get("symbol")
+            sec_type = arguments.get("sec_type", "STK")
+            bar_size = arguments.get("bar_size", "1 hour")
+            duration = arguments.get("duration", "1 D")
+            what_to_show = arguments.get("what_to_show", "TRADES")
+            use_rth = 1 if arguments.get("use_rth", True) else 0
+
+            # Create contract
+            contract = Contract()
+            contract.symbol = symbol
+            contract.secType = sec_type
+            contract.exchange = "SMART"
+            contract.currency = "USD"
+
+            # Get historical data
+            bars = await bridge.get_historical_data_async(
+                contract=contract,
+                end_datetime="",
+                duration_str=duration,
+                bar_size=bar_size,
+                what_to_show=what_to_show,
+                use_rth=use_rth
+            )
+
+            result = {
+                "symbol": symbol,
+                "bar_size": bar_size,
+                "duration": duration,
+                "bar_count": len(bars),
+                "bars": bars
+            }
+
+            return [types.TextContent(
+                type="text",
+                text=json.dumps(result, indent=2)
+            )]
+
+        elif name == "ibkr_subscribe_realtime_bars":
+            if not bridge.connected:
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({"error": "Not connected to TWS"}, indent=2)
+                )]
+
+            symbol = arguments.get("symbol")
+            sec_type = arguments.get("sec_type", "STK")
+            what_to_show = arguments.get("what_to_show", "TRADES")
+            use_rth = arguments.get("use_rth", False)
+
+            # Create contract
+            contract = Contract()
+            contract.symbol = symbol
+            contract.secType = sec_type
+            contract.exchange = "SMART"
+            contract.currency = "USD"
+
+            # Subscribe to real-time bars
+            req_id = await bridge.subscribe_realtime_bars_async(
+                contract=contract,
+                what_to_show=what_to_show,
+                use_rth=use_rth
+            )
+
+            # Get first few bars
+            await asyncio.sleep(10)  # Wait for a few bars to accumulate
+            bars = bridge.realtime_bars.get(req_id, [])
+
+            result = {
+                "status": "subscribed",
+                "symbol": symbol,
+                "req_id": req_id,
+                "bar_count": len(bars),
+                "latest_bars": bars[-5:] if len(bars) > 5 else bars,
+                "note": "Subscription is active. Use ibkr_cancel_realtime_bars to stop."
+            }
+
+            return [types.TextContent(
+                type="text",
+                text=json.dumps(result, indent=2)
+            )]
+
+        elif name == "ibkr_cancel_realtime_bars":
+            if not bridge.connected:
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({"error": "Not connected to TWS"}, indent=2)
+                )]
+
+            req_id = arguments.get("req_id")
+            bridge.cancel_realtime_bars(req_id)
+
+            result = {
+                "status": "cancelled",
+                "req_id": req_id
+            }
+
+            return [types.TextContent(
+                type="text",
+                text=json.dumps(result, indent=2)
+            )]
+
+        elif name == "ibkr_subscribe_pnl":
+            if not bridge.connected:
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({"error": "Not connected to TWS"}, indent=2)
+                )]
+
+            account = arguments.get("account", "")
+
+            # Subscribe to P&L
+            req_id = await bridge.subscribe_pnl_async(account=account)
+
+            # Wait for a few updates
+            await asyncio.sleep(2)
+
+            # Get current P&L data
+            pnl_data = bridge.pnl_data.get(req_id, {})
+
+            result = {
+                "status": "subscribed",
+                "req_id": req_id,
+                "account": account if account else "default",
+                "pnl": pnl_data,
+                "note": "P&L subscription is active. Updates arrive in real-time."
+            }
+
+            return [types.TextContent(
+                type="text",
+                text=json.dumps(result, indent=2)
+            )]
+
+        elif name == "ibkr_subscribe_pnl_single":
+            if not bridge.connected:
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({"error": "Not connected to TWS"}, indent=2)
+                )]
+
+            account = arguments.get("account", "")
+            con_id = arguments.get("con_id")
+
+            if not con_id:
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({"error": "con_id is required"}, indent=2)
+                )]
+
+            # Subscribe to position P&L
+            req_id = await bridge.subscribe_pnl_single_async(
+                account=account,
+                con_id=con_id
+            )
+
+            # Wait for updates
+            await asyncio.sleep(2)
+
+            # Get current P&L data
+            pnl_data = bridge.pnl_single_data.get(req_id, {})
+
+            result = {
+                "status": "subscribed",
+                "req_id": req_id,
+                "con_id": con_id,
+                "account": account if account else "default",
+                "pnl": pnl_data,
+                "note": "Position P&L subscription is active (~1 update/second)."
+            }
+
+            return [types.TextContent(
+                type="text",
+                text=json.dumps(result, indent=2)
+            )]
+
+        elif name == "ibkr_get_executions":
+            if not bridge.connected:
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({"error": "Not connected to TWS"}, indent=2)
+                )]
+
+            symbol = arguments.get("symbol", "")
+            side = arguments.get("side", "")
+            client_id = arguments.get("client_id", -1)
+
+            # Get executions
+            exec_data = await bridge.get_executions_async(
+                client_id=client_id,
+                symbol=symbol,
+                side=side
+            )
+
+            result = {
+                "status": "success",
+                "filters": {
+                    "symbol": symbol if symbol else "all",
+                    "side": side if side else "all",
+                    "client_id": client_id if client_id != -1 else "all"
+                },
+                "execution_count": exec_data['count'],
+                "executions": exec_data['executions']
+            }
+
+            return [types.TextContent(
+                type="text",
+                text=json.dumps(result, indent=2)
+            )]
+
+        elif name == "ibkr_get_all_open_orders":
+            if not bridge.connected:
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({"error": "Not connected to TWS"}, indent=2)
+                )]
+
+            # Get all open orders
+            orders = await bridge.get_all_open_orders_async()
+
+            result = {
+                "status": "success",
+                "order_count": len(orders),
+                "orders": orders
+            }
+
+            return [types.TextContent(
+                type="text",
+                text=json.dumps(result, indent=2)
+            )]
+
+        elif name == "ibkr_cancel_all_orders":
+            if not bridge.connected:
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({"error": "Not connected to TWS"}, indent=2)
+                )]
+
+            # Cancel all orders
+            bridge.cancel_all_orders_async()
+
+            # Wait a moment
+            await asyncio.sleep(1)
+
+            result = {
+                "status": "success",
+                "message": "Global cancel requested. All open orders are being cancelled.",
+                "warning": "This cancels ALL orders from ALL clients and TWS!"
+            }
+
+            return [types.TextContent(
+                type="text",
+                text=json.dumps(result, indent=2)
+            )]
+
         else:
             return [types.TextContent(
                 type="text",
