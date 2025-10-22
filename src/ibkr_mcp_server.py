@@ -769,7 +769,156 @@ class IBKRBridge(EWrapper, EClient):
             'take_profit_id': tp_id,
             'stop_loss_id': sl_id
         }
-    
+
+    async def place_vertical_spread_async(self,
+                                         symbol: str,
+                                         expiry: str,
+                                         long_strike: float,
+                                         short_strike: float,
+                                         right: str,
+                                         quantity: int,
+                                         net_price: float,
+                                         order_type: str = "LMT",
+                                         exchange: str = "SMART",
+                                         currency: str = "USD",
+                                         trading_class: str = "",
+                                         multiplier: str = "100") -> Dict[str, Any]:
+        """
+        Place a vertical spread order using BAG contract (combo order).
+
+        A vertical spread involves buying one option and selling another option
+        of the same type (both calls or both puts) with the same expiration
+        but different strikes.
+
+        Args:
+            symbol: Underlying symbol (e.g., "AAPL", "DAX")
+            expiry: Option expiry date (YYYYMMDD format)
+            long_strike: Strike price to BUY (lower for call spread, higher for put spread)
+            short_strike: Strike price to SELL (higher for call spread, lower for put spread)
+            right: "C" for call spread, "P" for put spread
+            quantity: Number of spreads (each spread = 1 long + 1 short)
+            net_price: Net debit/credit for the spread (positive = debit, negative = credit)
+            order_type: "LMT" for limit order, "MKT" for market order
+            exchange: Exchange (default "SMART")
+            currency: Currency (default "USD", use "EUR" for DAX)
+            trading_class: Trading class (e.g., "ODAX", "AAPL")
+            multiplier: Option multiplier (default "100", use "5" for ODAX)
+
+        Returns:
+            Dict with order_id and spread details
+
+        Example - Bull Call Spread:
+            long_strike=260, short_strike=265, right="C"
+            Buy 260 Call, Sell 265 Call (bullish, max profit if above 265)
+
+        Example - Bear Put Spread:
+            long_strike=265, short_strike=260, right="P"
+            Buy 265 Put, Sell 260 Put (bearish, max profit if below 260)
+        """
+        from ibapi.contract import Contract, ComboLeg
+        from ibapi.order import Order
+
+        logger.info(f"Placing vertical {right} spread: {symbol} {expiry} {long_strike}/{short_strike}")
+
+        # Step 1: Get contract IDs for both legs
+        # Long leg
+        long_details = await self.get_contract_details_async(
+            symbol=symbol,
+            sec_type="OPT",
+            exchange=exchange,
+            currency=currency,
+            strike=long_strike,
+            right=right,
+            expiry=expiry,
+            timeout=5.0
+        )
+
+        if not long_details:
+            raise ValueError(f"Could not find long leg: {symbol} {expiry} {long_strike} {right}")
+
+        long_con_id = long_details[0]['con_id']
+        logger.info(f"Long leg contract ID: {long_con_id}")
+
+        # Short leg
+        short_details = await self.get_contract_details_async(
+            symbol=symbol,
+            sec_type="OPT",
+            exchange=exchange,
+            currency=currency,
+            strike=short_strike,
+            right=right,
+            expiry=expiry,
+            timeout=5.0
+        )
+
+        if not short_details:
+            raise ValueError(f"Could not find short leg: {symbol} {expiry} {short_strike} {right}")
+
+        short_con_id = short_details[0]['con_id']
+        logger.info(f"Short leg contract ID: {short_con_id}")
+
+        # Step 2: Create BAG contract for the spread
+        spread = Contract()
+        spread.symbol = symbol
+        spread.secType = "BAG"
+        spread.currency = currency
+        spread.exchange = exchange
+
+        if trading_class:
+            spread.tradingClass = trading_class
+
+        # Create combo legs
+        # Leg 1: Buy (long position)
+        leg1 = ComboLeg()
+        leg1.conId = long_con_id
+        leg1.ratio = 1
+        leg1.action = "BUY"
+        leg1.exchange = exchange
+
+        # Leg 2: Sell (short position)
+        leg2 = ComboLeg()
+        leg2.conId = short_con_id
+        leg2.ratio = 1
+        leg2.action = "SELL"
+        leg2.exchange = exchange
+
+        spread.comboLegs = [leg1, leg2]
+
+        # Step 3: Create order
+        order_id = self.get_next_order_id()
+
+        order = Order()
+        order.orderId = order_id
+        order.action = "BUY"  # We're buying the spread (net debit for most spreads)
+        order.orderType = order_type
+        order.totalQuantity = quantity
+
+        if order_type == "LMT":
+            order.lmtPrice = abs(net_price)  # Net price for the spread
+
+        order.transmit = True
+
+        # Fix deprecated attributes
+        order = self.fix_order_attributes(order)
+
+        # Step 4: Place the combo order
+        await self.place_order_async(spread, order)
+
+        logger.info(f"Vertical spread order placed: Order ID {order_id}")
+
+        return {
+            'order_id': order_id,
+            'spread_type': f"{right} Spread",
+            'symbol': symbol,
+            'expiry': expiry,
+            'long_strike': long_strike,
+            'short_strike': short_strike,
+            'quantity': quantity,
+            'net_price': net_price,
+            'long_con_id': long_con_id,
+            'short_con_id': short_con_id
+        }
+
     async def get_option_chain_async(self, underlying: str, 
                                     expiry: Optional[str] = None,
                                     strike_range: Optional[Tuple[float, float]] = None,
@@ -1501,6 +1650,71 @@ async def handle_list_tools() -> list[types.Tool]:
             }
         ),
         types.Tool(
+            name="ibkr_place_vertical_spread",
+            description="Place a vertical spread order (buy one strike, sell another) as a single combo order",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "symbol": {
+                        "type": "string",
+                        "description": "Underlying symbol (e.g., AAPL, DAX, SPX)"
+                    },
+                    "expiry": {
+                        "type": "string",
+                        "description": "Option expiry date in YYYYMMDD format (e.g., 20251024)"
+                    },
+                    "long_strike": {
+                        "type": "number",
+                        "description": "Strike price to BUY (lower for call spread, higher for put spread)"
+                    },
+                    "short_strike": {
+                        "type": "number",
+                        "description": "Strike price to SELL (higher for call spread, lower for put spread)"
+                    },
+                    "right": {
+                        "type": "string",
+                        "enum": ["C", "P"],
+                        "description": "C for call spread (bullish), P for put spread (bearish)"
+                    },
+                    "quantity": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "Number of spreads to trade"
+                    },
+                    "net_price": {
+                        "type": "number",
+                        "description": "Net debit/credit for the spread (e.g., 2.50 for $2.50 debit)"
+                    },
+                    "order_type": {
+                        "type": "string",
+                        "enum": ["LMT", "MKT"],
+                        "default": "LMT",
+                        "description": "Order type (LMT for limit, MKT for market)"
+                    },
+                    "exchange": {
+                        "type": "string",
+                        "default": "SMART",
+                        "description": "Exchange (SMART for US, EUREX for DAX)"
+                    },
+                    "currency": {
+                        "type": "string",
+                        "default": "USD",
+                        "description": "Currency (USD for US, EUR for DAX)"
+                    },
+                    "trading_class": {
+                        "type": "string",
+                        "description": "Trading class (e.g., ODAX for DAX, leave empty for US options)"
+                    },
+                    "multiplier": {
+                        "type": "string",
+                        "default": "100",
+                        "description": "Option multiplier (100 for US, 5 for ODAX)"
+                    }
+                },
+                "required": ["symbol", "expiry", "long_strike", "short_strike", "right", "quantity", "net_price"]
+            }
+        ),
+        types.Tool(
             name="ibkr_get_order_status",
             description="Get status of a specific order",
             inputSchema={
@@ -2047,7 +2261,89 @@ async def handle_call_tool(
                 type="text",
                 text=json.dumps(result, indent=2)
             )]
-        
+
+        elif name == "ibkr_place_vertical_spread":
+            if not bridge.connected:
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({"error": "Not connected to TWS"}, indent=2)
+                )]
+
+            symbol = arguments.get("symbol")
+            expiry = arguments.get("expiry")
+            long_strike = arguments.get("long_strike")
+            short_strike = arguments.get("short_strike")
+            right = arguments.get("right")
+            quantity = arguments.get("quantity")
+            net_price = arguments.get("net_price")
+            order_type = arguments.get("order_type", "LMT")
+            exchange = arguments.get("exchange", "SMART")
+            currency = arguments.get("currency", "USD")
+            trading_class = arguments.get("trading_class", "")
+            multiplier = arguments.get("multiplier", "100")
+
+            try:
+                # Place vertical spread
+                spread_result = await bridge.place_vertical_spread_async(
+                    symbol=symbol,
+                    expiry=expiry,
+                    long_strike=long_strike,
+                    short_strike=short_strike,
+                    right=right,
+                    quantity=quantity,
+                    net_price=net_price,
+                    order_type=order_type,
+                    exchange=exchange,
+                    currency=currency,
+                    trading_class=trading_class,
+                    multiplier=multiplier
+                )
+
+                # Determine spread type name
+                if right == "C":
+                    if long_strike < short_strike:
+                        spread_name = "Bull Call Spread"
+                    else:
+                        spread_name = "Bear Call Spread"
+                else:  # Put
+                    if long_strike > short_strike:
+                        spread_name = "Bear Put Spread"
+                    else:
+                        spread_name = "Bull Put Spread"
+
+                result = {
+                    "order_id": spread_result['order_id'],
+                    "spread_type": spread_name,
+                    "symbol": symbol,
+                    "expiry": expiry,
+                    "long_leg": f"{right} {long_strike} (BUY)",
+                    "short_leg": f"{right} {short_strike} (SELL)",
+                    "quantity": quantity,
+                    "net_price": net_price,
+                    "order_type": order_type,
+                    "currency": currency,
+                    "max_profit": abs(short_strike - long_strike) - abs(net_price) if right == "C" else abs(net_price),
+                    "max_loss": abs(net_price),
+                    "status": "Submitted",
+                    "timestamp": datetime.now().isoformat()
+                }
+
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps(result, indent=2)
+                )]
+
+            except Exception as e:
+                return [types.TextContent(
+                    type="text",
+                    text=json.dumps({
+                        "error": str(e),
+                        "symbol": symbol,
+                        "expiry": expiry,
+                        "strikes": f"{long_strike}/{short_strike}"
+                    }, indent=2)
+                )]
+
         elif name == "ibkr_get_order_status":
             order_id = arguments.get("order_id")
             order_data = bridge.orders.get(order_id)
