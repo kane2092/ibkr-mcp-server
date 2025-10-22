@@ -1391,6 +1391,10 @@ async def handle_list_tools() -> list[types.Tool]:
                         "default": "USD",
                         "description": "Currency (USD for US options, EUR for DAX options)"
                     },
+                    "trading_class": {
+                        "type": "string",
+                        "description": "Trading class (e.g., ODAX for DAX options, SPXW for SPX weeklies)"
+                    },
                     "include_greeks": {
                         "type": "boolean",
                         "default": False,
@@ -1891,6 +1895,7 @@ async def handle_call_tool(
             right = arguments.get("right")
             exchange = arguments.get("exchange", "SMART")
             currency = arguments.get("currency", "USD")
+            trading_class = arguments.get("trading_class")
             include_greeks = arguments.get("include_greeks", False)
 
             # If no expiry specified, use today (0DTE)
@@ -1922,13 +1927,17 @@ async def handle_call_tool(
                     contract.exchange = exchange
                     contract.currency = currency
                     contract.multiplier = opt.get('multiplier', '100')
-                    
+
+                    # Set trading class if specified (required for DAX options)
+                    if trading_class:
+                        contract.tradingClass = trading_class
+
                     # Get market data with Greeks
                     market_data = await bridge.get_market_data_async(contract, include_greeks=True)
-                    
+
                     # Merge market data into option
                     options[i].update(market_data)
-                    
+
                     # Small delay to avoid rate limits
                     await asyncio.sleep(0.1)
             
