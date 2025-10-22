@@ -1327,7 +1327,7 @@ async def handle_list_tools() -> list[types.Tool]:
                 "properties": {
                     "symbol": {
                         "type": "string",
-                        "description": "Symbol to quote (e.g., SPY, AAPL)"
+                        "description": "Symbol to quote (e.g., SPY, AAPL, DAX, SPX)"
                     },
                     "sec_type": {
                         "type": "string",
@@ -1338,7 +1338,12 @@ async def handle_list_tools() -> list[types.Tool]:
                     "exchange": {
                         "type": "string",
                         "default": "SMART",
-                        "description": "Exchange (SMART for auto-routing)"
+                        "description": "Exchange (SMART for US, EUREX for DAX, CBOE for SPX)"
+                    },
+                    "currency": {
+                        "type": "string",
+                        "default": "USD",
+                        "description": "Currency (USD for US stocks/SPX, EUR for DAX)"
                     },
                     "include_greeks": {
                         "type": "boolean",
@@ -1357,7 +1362,7 @@ async def handle_list_tools() -> list[types.Tool]:
                 "properties": {
                     "underlying": {
                         "type": "string",
-                        "description": "Underlying symbol (e.g., SPY, SPX)"
+                        "description": "Underlying symbol (e.g., SPY, SPX, DAX)"
                     },
                     "expiry": {
                         "type": "string",
@@ -1375,6 +1380,16 @@ async def handle_list_tools() -> list[types.Tool]:
                         "type": "string",
                         "enum": ["C", "P"],
                         "description": "Option right (C=Call, P=Put, null=both)"
+                    },
+                    "exchange": {
+                        "type": "string",
+                        "default": "SMART",
+                        "description": "Exchange (SMART for US options, EUREX for DAX options)"
+                    },
+                    "currency": {
+                        "type": "string",
+                        "default": "USD",
+                        "description": "Currency (USD for US options, EUR for DAX options)"
                     },
                     "include_greeks": {
                         "type": "boolean",
@@ -1690,7 +1705,7 @@ async def handle_list_tools() -> list[types.Tool]:
                 "properties": {
                     "symbol": {
                         "type": "string",
-                        "description": "Underlying symbol (e.g., SPY, AAPL, SPX)"
+                        "description": "Underlying symbol (e.g., SPY, AAPL, SPX, DAX)"
                     },
                     "sec_type": {
                         "type": "string",
@@ -1701,7 +1716,12 @@ async def handle_list_tools() -> list[types.Tool]:
                     "exchange": {
                         "type": "string",
                         "default": "SMART",
-                        "description": "Exchange"
+                        "description": "Exchange (SMART for US, EUREX for DAX, CBOE for SPX)"
+                    },
+                    "currency": {
+                        "type": "string",
+                        "default": "USD",
+                        "description": "Currency (USD for US, EUR for DAX)"
                     }
                 },
                 "required": ["symbol"]
@@ -1825,18 +1845,19 @@ async def handle_call_tool(
                     type="text",
                     text=json.dumps({"error": "Not connected to TWS"}, indent=2)
                 )]
-            
+
             symbol = arguments.get("symbol")
             sec_type = arguments.get("sec_type", "STK")
             exchange = arguments.get("exchange", "SMART")
+            currency = arguments.get("currency", "USD")
             include_greeks = arguments.get("include_greeks", False)
-            
+
             # Create contract
             contract = Contract()
             contract.symbol = symbol
             contract.secType = sec_type
-            contract.exchange = exchange if sec_type == "STK" else "CBOE" if sec_type == "IND" else exchange
-            contract.currency = "USD"
+            contract.exchange = exchange
+            contract.currency = currency
             
             # Get market data
             data = await bridge.get_market_data_async(contract, include_greeks=include_greeks)
@@ -1862,22 +1883,24 @@ async def handle_call_tool(
                     type="text",
                     text=json.dumps({"error": "Not connected to TWS"}, indent=2)
                 )]
-            
+
             underlying = arguments.get("underlying")
             expiry = arguments.get("expiry")
             min_strike = arguments.get("min_strike")
             max_strike = arguments.get("max_strike")
             right = arguments.get("right")
+            exchange = arguments.get("exchange", "SMART")
+            currency = arguments.get("currency", "USD")
             include_greeks = arguments.get("include_greeks", False)
-            
+
             # If no expiry specified, use today (0DTE)
             if not expiry:
                 expiry = datetime.now().strftime("%Y%m%d")
-            
+
             # Get option chain
             strike_range = (min_strike, max_strike) if min_strike and max_strike else None
             options = await bridge.get_option_chain_async(underlying, expiry, strike_range, right)
-            
+
             if not options:
                 return [types.TextContent(
                     type="text",
@@ -1886,7 +1909,7 @@ async def handle_call_tool(
                         "suggestions": "Check expiry format (YYYYMMDD) and strike range"
                     }, indent=2)
                 )]
-            
+
             # Get market data and Greeks for each option if requested
             if include_greeks:
                 for i, opt in enumerate(options[:20]):  # Limit to 20 to avoid rate limits
@@ -1896,8 +1919,8 @@ async def handle_call_tool(
                     contract.strike = opt['strike']
                     contract.right = opt['right']
                     contract.lastTradeDateOrContractMonth = opt['expiry']
-                    contract.exchange = "SMART"
-                    contract.currency = "USD"
+                    contract.exchange = exchange
+                    contract.currency = currency
                     contract.multiplier = opt.get('multiplier', '100')
                     
                     # Get market data with Greeks
@@ -2391,12 +2414,14 @@ async def handle_call_tool(
             symbol = arguments.get("symbol")
             sec_type = arguments.get("sec_type", "STK")
             exchange = arguments.get("exchange", "SMART")
+            currency = arguments.get("currency", "USD")
 
             # Get option parameters
             params = await bridge.get_option_parameters_async(
                 symbol=symbol,
                 sec_type=sec_type,
-                exchange=exchange
+                exchange=exchange,
+                currency=currency
             )
 
             result = {
