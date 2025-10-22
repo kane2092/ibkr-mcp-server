@@ -1122,14 +1122,16 @@ class IBKRBridge(EWrapper, EClient):
 
     async def get_option_parameters_async(self, symbol: str, sec_type: str = "STK",
                                          exchange: str = "SMART",
+                                         currency: str = "USD",
                                          timeout: float = 10.0) -> List[Dict[str, Any]]:
         """
         Get option parameters (available strikes and expirations) for an underlying.
 
         Args:
-            symbol: Underlying symbol (e.g., "SPY", "AAPL")
+            symbol: Underlying symbol (e.g., "SPY", "AAPL", "DAX")
             sec_type: Security type (default: "STK")
             exchange: Exchange (default: "SMART")
+            currency: Currency (default: "USD", use "EUR" for DAX, etc.)
             timeout: Timeout in seconds
 
         Returns:
@@ -1141,6 +1143,7 @@ class IBKRBridge(EWrapper, EClient):
             symbol=symbol,
             sec_type=sec_type,
             exchange=exchange,
+            currency=currency,
             timeout=5.0
         )
 
