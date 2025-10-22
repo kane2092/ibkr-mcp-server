@@ -782,7 +782,8 @@ class IBKRBridge(EWrapper, EClient):
                                          exchange: str = "SMART",
                                          currency: str = "USD",
                                          trading_class: str = "",
-                                         multiplier: str = "100") -> Dict[str, Any]:
+                                         multiplier: str = "100",
+                                         transmit: bool = True) -> Dict[str, Any]:
         """
         Place a vertical spread order using BAG contract (combo order).
 
@@ -803,6 +804,7 @@ class IBKRBridge(EWrapper, EClient):
             currency: Currency (default "USD", use "EUR" for DAX)
             trading_class: Trading class (e.g., "ODAX", "AAPL")
             multiplier: Option multiplier (default "100", use "5" for ODAX)
+            transmit: If True, submit order immediately; if False, create preview order (default True)
 
         Returns:
             Dict with order_id and spread details
@@ -896,7 +898,7 @@ class IBKRBridge(EWrapper, EClient):
         if order_type == "LMT":
             order.lmtPrice = abs(net_price)  # Net price for the spread
 
-        order.transmit = True
+        order.transmit = transmit
 
         # Fix deprecated attributes
         order = self.fix_order_attributes(order)
@@ -1709,6 +1711,11 @@ async def handle_list_tools() -> list[types.Tool]:
                         "type": "string",
                         "default": "100",
                         "description": "Option multiplier (100 for US, 5 for ODAX)"
+                    },
+                    "transmit": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "If true, submit order immediately; if false, create preview order (allows review before submission)"
                     }
                 },
                 "required": ["symbol", "expiry", "long_strike", "short_strike", "right", "quantity", "net_price"]
@@ -2281,6 +2288,7 @@ async def handle_call_tool(
             currency = arguments.get("currency", "USD")
             trading_class = arguments.get("trading_class", "")
             multiplier = arguments.get("multiplier", "100")
+            transmit = arguments.get("transmit", True)
 
             try:
                 # Place vertical spread
@@ -2296,7 +2304,8 @@ async def handle_call_tool(
                     exchange=exchange,
                     currency=currency,
                     trading_class=trading_class,
-                    multiplier=multiplier
+                    multiplier=multiplier,
+                    transmit=transmit
                 )
 
                 # Determine spread type name
@@ -2324,7 +2333,8 @@ async def handle_call_tool(
                     "currency": currency,
                     "max_profit": abs(short_strike - long_strike) - abs(net_price) if right == "C" else abs(net_price),
                     "max_loss": abs(net_price),
-                    "status": "Submitted",
+                    "status": "Submitted" if transmit else "Preview (Not Submitted)",
+                    "transmit": transmit,
                     "timestamp": datetime.now().isoformat()
                 }
 
