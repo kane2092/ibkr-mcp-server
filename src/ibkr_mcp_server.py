@@ -691,7 +691,7 @@ async def handle_list_tools() -> list[types.Tool]:
                     },
                     "include_greeks": {
                         "type": "boolean",
-                        "default": false,
+                        "default": False,
                         "description": "Include Greeks for options"
                     }
                 },
@@ -727,7 +727,7 @@ async def handle_list_tools() -> list[types.Tool]:
                     },
                     "include_greeks": {
                         "type": "boolean",
-                        "default": false,
+                        "default": False,
                         "description": "Fetch Greeks for each option"
                     }
                 },
@@ -776,7 +776,7 @@ async def handle_list_tools() -> list[types.Tool]:
                     },
                     "transmit": {
                         "type": "boolean",
-                        "default": false,
+                        "default": False,
                         "description": "Auto-transmit order (false=manual confirmation in TWS)"
                     }
                 },
@@ -823,7 +823,7 @@ async def handle_list_tools() -> list[types.Tool]:
                     },
                     "transmit": {
                         "type": "boolean",
-                        "default": false,
+                        "default": False,
                         "description": "Auto-transmit all orders"
                     }
                 },
